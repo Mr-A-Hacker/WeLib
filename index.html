@@ -299,6 +299,7 @@
   <div class="admin-body">
     <div class="admin-sidebar">
       <div class="sidebar-item active" onclick="adminTab('dashboard',this)">📊 Dashboard</div>
+      <div class="sidebar-item" onclick="adminTab('requests',this)">🔔 Requests <span id="req-badge" style="background:#c9963c;color:#000;border-radius:20px;padding:1px 8px;font-size:11px;font-weight:900;margin-left:4px;display:none"></span></div>
       <div class="sidebar-item" onclick="adminTab('upload',this)">📤 Upload Book</div>
       <div class="sidebar-item" onclick="adminTab('books',this)">📚 Manage Books</div>
       <div class="sidebar-item" onclick="adminTab('upload-manga',this)">🗂 Upload Manga</div>
@@ -311,7 +312,8 @@
         <h2 style="font-family:'Playfair Display',serif;font-size:28px;font-weight:900;margin-bottom:24px">Dashboard</h2>
         <div class="stat-cards">
           <div class="stat-card"><div class="num" id="st-books">—</div><div class="lbl">Total Books</div></div>
-          <div class="stat-card"><div class="num" id="st-users">—</div><div class="lbl">Total Users</div></div>
+          <div class="stat-card"><div class="num" id="st-users">—</div><div class="lbl">Active Users</div></div>
+          <div class="stat-card" style="border:2px solid #c9963c"><div class="num" id="st-pending" style="color:#c9963c">—</div><div class="lbl">Pending Requests</div></div>
           <div class="stat-card"><div class="num" id="st-revenue">—</div><div class="lbl">Monthly Revenue</div></div>
           <div class="stat-card"><div class="num" id="st-tier1">—</div><div class="lbl">Reader (Tier 1)</div></div>
           <div class="stat-card"><div class="num" id="st-tier2">—</div><div class="lbl">Scholar (Tier 2)</div></div>
@@ -319,6 +321,18 @@
         <div class="admin-card">
           <h3>Quick Actions</h3>
           <button class="btn-admin" onclick="adminTab('upload', document.querySelectorAll('.sidebar-item')[1])">+ Upload a New Book</button>
+        </div>
+      </div>
+
+      <div class="admin-section" id="admin-requests">
+        <h2 style="font-family:'Playfair Display',serif;font-size:28px;font-weight:900;margin-bottom:24px">Pending Requests</h2>
+        <div class="admin-card">
+          <h3>Account Requests — Awaiting Approval</h3>
+          <p style="font-size:13px;color:#888;margin-bottom:20px">Verify the CashApp payment to <strong>$AbdullahLababidi19</strong> with description "Requesting to make an account in BookVault", then approve or decline.</p>
+          <table class="books-admin-table" id="admin-requests-table">
+            <tr><th>Name</th><th>Email</th><th>Plan</th><th>Actions</th></tr>
+          </table>
+          <p id="no-requests-msg" style="color:#aaa;font-size:14px;margin-top:16px;display:none">No pending requests. 🎉</p>
         </div>
       </div>
 
@@ -420,7 +434,7 @@
         <div class="admin-card">
           <h3>Registered Users</h3>
           <table class="books-admin-table" id="admin-users-table">
-            <tr><th>Name</th><th>Email</th><th>Plan</th></tr>
+            <tr><th>Name</th><th>Email</th><th>Plan</th><th>Status</th><th>Action</th></tr>
           </table>
         </div>
       </div>
@@ -443,21 +457,58 @@
       <div class="modal-switch">No account? <a onclick="openModal('signup')">Create one →</a></div>
     </div>
     <div id="modal-signup" style="display:none">
-      <div class="modal-title">Create Account</div>
-      <div class="modal-sub">Join 2 million readers on BookVault</div>
-      <div class="form-group"><label>Full Name</label><input type="text" id="reg-name" placeholder="Your Name"></div>
-      <div class="form-group"><label>Email</label><input type="email" id="reg-email" placeholder="your@email.com"></div>
-      <div class="form-group"><label>Password</label><input type="password" id="reg-pass" placeholder="Create a password"></div>
-      <div class="form-group">
-        <label>Choose Plan</label>
-        <select id="reg-plan">
-          <option value="1">Reader — $10/month (Read online)</option>
-          <option value="2">Scholar — $20/month (Read + PDF Downloads)</option>
-        </select>
+      <!-- Step 1: Account details -->
+      <div id="signup-step1">
+        <div class="modal-title">Create Account</div>
+        <div class="modal-sub">Join 2 million readers on BookVault</div>
+        <div class="form-group"><label>Full Name</label><input type="text" id="reg-name" placeholder="Your Name"></div>
+        <div class="form-group"><label>Email</label><input type="email" id="reg-email" placeholder="your@email.com"></div>
+        <div class="form-group"><label>Password</label><input type="password" id="reg-pass" placeholder="Create a password"></div>
+        <div class="form-group">
+          <label>Choose Plan</label>
+          <select id="reg-plan" onchange="updateCashAppAmount()">
+            <option value="1">Reader — $10/month (Read online)</option>
+            <option value="2">Scholar — $20/month (Read + PDF Downloads)</option>
+          </select>
+        </div>
+        <p class="modal-err" id="signup-err"></p>
+        <button class="btn-ink" onclick="goToPaymentStep()">Continue to Payment →</button>
+        <div class="modal-switch">Already have an account? <a onclick="openModal('login')">Sign in →</a></div>
       </div>
-      <p class="modal-err" id="signup-err"></p>
-      <button class="btn-ink" id="signup-btn" onclick="doSignup()">Create Account</button>
-      <div class="modal-switch">Already have an account? <a onclick="openModal('login')">Sign in →</a></div>
+
+      <!-- Step 2: CashApp payment -->
+      <div id="signup-step2" style="display:none">
+        <div class="modal-title">Complete Payment</div>
+        <div class="modal-sub">Send payment via CashApp to activate your account</div>
+        <div style="background:#f0faf0;border:2px solid #4a5e52;border-radius:8px;padding:20px;margin-bottom:20px;text-align:center">
+          <div style="font-size:32px;margin-bottom:8px">💸</div>
+          <div style="font-size:13px;color:#555;margin-bottom:6px;font-weight:700;text-transform:uppercase;letter-spacing:1px">Send to CashApp</div>
+          <div style="font-family:'Playfair Display',serif;font-size:28px;font-weight:900;color:#0a0a0a;margin-bottom:4px">$AbdullahLababidi19</div>
+          <div style="font-size:22px;font-weight:900;color:#4a5e52;margin-bottom:12px" id="cashapp-amount">$10.00</div>
+          <div style="background:#fff;border:1px solid #ddd;border-radius:5px;padding:10px;font-size:13px;color:#333">
+            <strong>Description (required):</strong><br>
+            <span style="font-family:monospace;font-size:14px;color:#1a3a5c">Requesting to make an account in BookVault</span>
+          </div>
+        </div>
+        <div style="font-size:13px;color:#666;margin-bottom:20px;line-height:1.6">
+          ⚠️ After sending payment, click <strong>Submit Request</strong>. The admin will verify your payment and activate your account. You'll receive a confirmation email.
+        </div>
+        <p class="modal-err" id="signup-err2"></p>
+        <button class="btn-ink" id="signup-btn" onclick="doSignup()">✓ I've Paid — Submit Request</button>
+        <div style="text-align:center;margin-top:12px"><a onclick="backToStep1()" style="font-size:13px;color:#888;cursor:pointer">← Go back</a></div>
+      </div>
+
+      <!-- Step 3: Pending confirmation -->
+      <div id="signup-step3" style="display:none;text-align:center">
+        <div style="font-size:48px;margin-bottom:16px">⏳</div>
+        <div class="modal-title" style="font-size:22px">Request Submitted!</div>
+        <div style="margin:16px 0;font-size:15px;line-height:1.7;color:#555">
+          Your account request has been received.<br>
+          The admin will review your CashApp payment and activate your account.<br><br>
+          <strong>We will send you an email once your account is approved.</strong>
+        </div>
+        <button class="btn-ink" onclick="closeModal()">Close</button>
+      </div>
     </div>
   </div>
 </div>
@@ -511,6 +562,10 @@ function openModal(view){
   document.getElementById('modal-signup').style.display = view==='signup' ? 'block' : 'none';
   document.getElementById('login-err').style.display='none';
   document.getElementById('signup-err').style.display='none';
+  // Reset signup to step 1
+  document.getElementById('signup-step1').style.display='block';
+  document.getElementById('signup-step2').style.display='none';
+  document.getElementById('signup-step3').style.display='none';
 }
 function closeModal(){ document.getElementById('auth-modal').classList.remove('open'); }
 
@@ -534,9 +589,35 @@ async function doLogin(){
   } finally { btn.disabled=false; btn.textContent='Sign In'; }
 }
 
+function goToPaymentStep(){
+  const name  = document.getElementById('reg-name').value.trim();
+  const email = document.getElementById('reg-email').value.trim();
+  const pw    = document.getElementById('reg-pass').value;
+  const err   = document.getElementById('signup-err');
+  if(!name || !email || pw.length < 4){
+    err.textContent = 'Please fill all fields (password min 4 chars).';
+    err.style.display = 'block'; return;
+  }
+  err.style.display = 'none';
+  document.getElementById('signup-step1').style.display = 'none';
+  document.getElementById('signup-step2').style.display = 'block';
+  updateCashAppAmount();
+}
+
+function backToStep1(){
+  document.getElementById('signup-step2').style.display = 'none';
+  document.getElementById('signup-step1').style.display = 'block';
+}
+
+function updateCashAppAmount(){
+  const tier = parseInt(document.getElementById('reg-plan')?.value || 1);
+  const el = document.getElementById('cashapp-amount');
+  if(el) el.textContent = tier === 2 ? '$20.00' : '$10.00';
+}
+
 async function doSignup(){
-  const btn=document.getElementById('signup-btn');
-  btn.disabled=true; btn.textContent='Creating account…';
+  const btn = document.getElementById('signup-btn');
+  btn.disabled=true; btn.textContent='Submitting…';
   try {
     const data = await api('/api/auth/register',{
       method:'POST',
@@ -547,13 +628,14 @@ async function doSignup(){
         tier:     parseInt(document.getElementById('reg-plan').value)
       })
     });
-    saveSession(data);
-    closeModal();
-    showLibrary();
+    // Show pending confirmation step
+    document.getElementById('signup-step2').style.display = 'none';
+    document.getElementById('signup-step3').style.display = 'block';
   } catch(e){
-    document.getElementById('signup-err').textContent=e.message;
-    document.getElementById('signup-err').style.display='block';
-  } finally { btn.disabled=false; btn.textContent='Create Account'; }
+    const err = document.getElementById('signup-err2');
+    err.textContent = e.message;
+    err.style.display = 'block';
+  } finally { btn.disabled=false; btn.textContent='✓ I\'ve Paid — Submit Request'; }
 }
 
 function saveSession(data){
@@ -694,10 +776,80 @@ async function loadAdminStats(){
     const s=await api('/api/admin/stats');
     document.getElementById('st-books').textContent=s.total_books;
     document.getElementById('st-users').textContent=s.total_users;
+    document.getElementById('st-pending').textContent=s.pending_users;
     document.getElementById('st-revenue').textContent='$'+s.monthly_revenue.toLocaleString();
     document.getElementById('st-tier1').textContent=s.tier1_users;
     document.getElementById('st-tier2').textContent=s.tier2_users;
+    // Update badge on Requests sidebar item
+    const badge = document.getElementById('req-badge');
+    if(s.pending_users > 0){ badge.textContent=s.pending_users; badge.style.display='inline'; }
+    else { badge.style.display='none'; }
   } catch(e){}
+}
+
+// ── ADMIN REQUESTS ─────────────────────────────────────────
+async function loadAdminRequests(){
+  try {
+    const users = await api('/api/admin/requests');
+    const t = document.getElementById('admin-requests-table');
+    const noMsg = document.getElementById('no-requests-msg');
+    if(!users.length){
+      t.innerHTML=`<tr><th>Name</th><th>Email</th><th>Plan</th><th>Actions</th></tr>`;
+      noMsg.style.display='block'; return;
+    }
+    noMsg.style.display='none';
+    t.innerHTML=`<tr><th>Name</th><th>Email</th><th>Plan</th><th>Actions</th></tr>`
+      +users.map(u=>`
+        <tr>
+          <td><strong>${u.name}</strong></td>
+          <td>${u.email}</td>
+          <td><span class="tag ${u.tier===2?'tag-blue':'tag-gold'}">${u.tier===2?'Scholar $20':'Reader $10'}</span></td>
+          <td style="display:flex;gap:8px">
+            <button onclick="approveUser(${u.id})" style="background:#e8f5e9;border:1px solid #4caf50;color:#2e7d32;padding:5px 14px;border-radius:4px;cursor:pointer;font-size:12px;font-weight:700">✓ Approve</button>
+            <button onclick="declineUser(${u.id})" style="background:#fee;border:1px solid #fcc;color:#c00;padding:5px 14px;border-radius:4px;cursor:pointer;font-size:12px;font-weight:700">✗ Decline</button>
+          </td>
+        </tr>`).join('');
+    await loadAdminStats();
+  } catch(e){ showToast('Failed to load requests'); }
+}
+
+async function approveUser(id){
+  try {
+    await api(`/api/admin/requests/${id}/approve`,{method:'POST'});
+    showToast('✓ User approved — email sent!'); loadAdminRequests();
+  } catch(e){ showToast('Error: '+e.message); }
+}
+
+async function declineUser(id){
+  if(!confirm('Decline this request? An email will be sent to the user.')) return;
+  try {
+    await api(`/api/admin/requests/${id}/decline`,{method:'POST'});
+    showToast('Request declined — email sent.'); loadAdminRequests();
+  } catch(e){ showToast('Error: '+e.message); }
+}
+
+async function loadAdminUsers(){
+  try {
+    const users=await api('/api/admin/users');
+    const t=document.getElementById('admin-users-table');
+    t.innerHTML=`<tr><th>Name</th><th>Email</th><th>Plan</th><th>Status</th><th>Action</th></tr>`
+      +users.map(u=>`
+        <tr>
+          <td>${u.name}</td>
+          <td>${u.email}</td>
+          <td><span class="tag ${u.tier===2?'tag-blue':'tag-gold'}">${u.tier===2?'Scholar':'Reader'}</span></td>
+          <td><span class="tag" style="${u.status==='active'?'background:#e8f5e9;color:#2e7d32':'background:#fee;color:#c00'}">${u.status}</span></td>
+          <td><button onclick="deleteUser(${u.id})" style="background:#fee;border:1px solid #fcc;color:#c00;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:12px">Delete</button></td>
+        </tr>`).join('');
+  } catch(e){}
+}
+
+async function deleteUser(id){
+  if(!confirm('Permanently delete this user?')) return;
+  try {
+    await api(`/api/admin/users/${id}`,{method:'DELETE'});
+    showToast('User deleted'); loadAdminUsers(); loadAdminStats();
+  } catch(e){ showToast('Error: '+e.message); }
 }
 
 function adminTab(section, el){
@@ -708,6 +860,7 @@ function adminTab(section, el){
   if(section==='books') loadAdminBooks();
   if(section==='users') loadAdminUsers();
   if(section==='manga') loadAdminManga();
+  if(section==='requests') loadAdminRequests();
   if(section==='dashboard') loadAdminStats();
 }
 
@@ -770,20 +923,6 @@ async function deleteBook(id){
     await api(`/api/admin/books/${id}`,{method:'DELETE'});
     showToast('Book deleted'); loadAdminBooks(); loadAdminStats();
   } catch(e){ showToast('Error: '+e.message); }
-}
-
-async function loadAdminUsers(){
-  try {
-    const users=await api('/api/admin/users');
-    const t=document.getElementById('admin-users-table');
-    t.innerHTML=`<tr><th>Name</th><th>Email</th><th>Plan</th></tr>`
-      +users.map(u=>`
-        <tr>
-          <td>${u.name}</td>
-          <td>${u.email}</td>
-          <td><span class="tag ${u.tier===2?'tag-blue':'tag-gold'}">${u.tier===2?'Scholar':'Reader'}</span></td>
-        </tr>`).join('');
-  } catch(e){}
 }
 
 // ── MANGA ADMIN ────────────────────────────────────────────
