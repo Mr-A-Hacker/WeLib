@@ -79,6 +79,8 @@ class Manga(db.Model):
 # ── DB Init ────────────────────────────────────────────────
 def init_db():
     db.create_all()
+
+    # ── Step 1: seed admin in its own transaction ──
     try:
         if not User.query.filter_by(email='admin@bookvault.com').first():
             db.session.add(User(
@@ -86,7 +88,12 @@ def init_db():
                 password=bcrypt.generate_password_hash('admin1').decode(),
                 tier=0, is_admin=True, status='active'
             ))
-            db.session.flush()  # catch duplicate before books insert
+            db.session.commit()
+    except Exception:
+        db.session.rollback()  # another worker beat us to it — fine
+
+    # ── Step 2: seed books in its own transaction ──
+    try:
         if Book.query.count() == 0:
             seeds = [
                 Book(title='The Great Gatsby',  author='F. Scott Fitzgerald', genre='Classic Literature', year=1925, color='#1a3a5c', description='A story of wealth, obsession, and the American Dream in the 1920s.'),
@@ -103,9 +110,9 @@ def init_db():
                 Book(title='Educated',          author='Tara Westover',       genre='Biography',          year=2018, color='#3a1a5c', description='A remarkable memoir about escaping a survivalist family.'),
             ]
             db.session.add_all(seeds)
-        db.session.commit()
+            db.session.commit()
     except Exception:
-        db.session.rollback()  # another worker already seeded — that's fine
+        db.session.rollback()  # another worker beat us to it — fine
 
 with app.app_context():
     init_db()
