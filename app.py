@@ -8,6 +8,7 @@ from flask_jwt_extended import (
     JWTManager, create_access_token,
     jwt_required, get_jwt_identity
 )
+from flask_mail import Mail, Message
 from datetime import timedelta
 from botocore.client import Config
 from werkzeug.utils import secure_filename
@@ -15,17 +16,26 @@ from werkzeug.utils import secure_filename
 # ── App Setup ──────────────────────────────────────────────
 app = Flask(__name__, static_folder='.', template_folder='.')
 
-app.config['SQLALCHEMY_DATABASE_URI']     = os.environ.get('DATABASE_URL', 'sqlite:///bookvault.db').replace('postgres://', 'postgresql://')
+app.config['SQLALCHEMY_DATABASE_URI']        = os.environ.get('DATABASE_URL', 'sqlite:///bookvault.db').replace('postgres://', 'postgresql://')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['JWT_SECRET_KEY']              = os.environ.get('JWT_SECRET', 'change-me-in-production')
-app.config['JWT_ACCESS_TOKEN_EXPIRES']    = timedelta(days=7)
-app.config['MAX_CONTENT_LENGTH']          = 200 * 1024 * 1024  # 200 MB
+app.config['JWT_SECRET_KEY']                 = os.environ.get('JWT_SECRET', 'change-me-in-production')
+app.config['JWT_ACCESS_TOKEN_EXPIRES']       = timedelta(days=7)
+app.config['MAX_CONTENT_LENGTH']             = 200 * 1024 * 1024  # 200 MB
+
+# ── Mail Config (set these env vars in Render) ─────────────
+app.config['MAIL_SERVER']         = os.environ.get('MAIL_SERVER', 'smtp.gmail.com')
+app.config['MAIL_PORT']           = int(os.environ.get('MAIL_PORT', 587))
+app.config['MAIL_USE_TLS']        = True
+app.config['MAIL_USERNAME']       = os.environ.get('MAIL_USERNAME', '')
+app.config['MAIL_PASSWORD']       = os.environ.get('MAIL_PASSWORD', '')
+app.config['MAIL_DEFAULT_SENDER'] = os.environ.get('MAIL_DEFAULT_SENDER', os.environ.get('MAIL_USERNAME', ''))
 
 db     = SQLAlchemy(app)
 bcrypt = Bcrypt(app)
 jwt    = JWTManager(app)
+mail   = Mail(app)
 
-# ── Backblaze B2 (S3-compatible) ───────────────────────────
+# ── Backblaze B2 ───────────────────────────────────────────
 B2_KEY_ID      = os.environ.get('B2_KEY_ID', '')
 B2_APP_KEY     = os.environ.get('B2_APP_KEY', '')
 B2_BUCKET_NAME = os.environ.get('B2_BUCKET_NAME', '')
@@ -47,8 +57,9 @@ class User(db.Model):
     name     = db.Column(db.String(120), nullable=False)
     email    = db.Column(db.String(200), unique=True, nullable=False)
     password = db.Column(db.String(200), nullable=False)
-    tier     = db.Column(db.Integer, default=0)   # 0=free, 1=Reader $10, 2=Scholar $20
+    tier     = db.Column(db.Integer, default=1)        # 1=Reader, 2=Scholar
     is_admin = db.Column(db.Boolean, default=False)
+    status   = db.Column(db.String(20), default='pending')  # pending / active / declined
 
 class Book(db.Model):
     __tablename__ = 'books'
@@ -59,8 +70,8 @@ class Book(db.Model):
     year        = db.Column(db.Integer)
     color       = db.Column(db.String(20), default='#1a3a5c')
     description = db.Column(db.Text)
-    file_key    = db.Column(db.String(500))   # B2 object key
-    file_name   = db.Column(db.String(300))   # original filename
+    file_key    = db.Column(db.String(500))
+    file_name   = db.Column(db.String(300))
 
 class Manga(db.Model):
     __tablename__ = 'manga'
@@ -69,20 +80,20 @@ class Manga(db.Model):
     author      = db.Column(db.String(200), nullable=False)
     genre       = db.Column(db.String(100))
     chapters    = db.Column(db.Integer)
-    status      = db.Column(db.String(50), default='Ongoing')  # Ongoing / Completed
+    status      = db.Column(db.String(50), default='Ongoing')
     color       = db.Column(db.String(20), default='#1a1a2e')
     description = db.Column(db.Text)
     file_key    = db.Column(db.String(500))
     file_name   = db.Column(db.String(300))
 
-# ── DB Init + seed ─────────────────────────────────────────
+# ── DB Init ────────────────────────────────────────────────
 def init_db():
     db.create_all()
     if not User.query.filter_by(email='admin@bookvault.com').first():
         db.session.add(User(
             name='Admin', email='admin@bookvault.com',
             password=bcrypt.generate_password_hash('admin1').decode(),
-            tier=0, is_admin=True
+            tier=0, is_admin=True, status='active'
         ))
     if Book.query.count() == 0:
         seeds = [
@@ -121,6 +132,14 @@ def require_admin():
         return None, (jsonify({'error': 'Admin only'}), 403)
     return user, None
 
+def send_email(to, subject, body):
+    """Send email — silently fails if mail not configured."""
+    try:
+        msg = Message(subject, recipients=[to], body=body)
+        mail.send(msg)
+    except Exception as e:
+        print(f'[Mail] Could not send to {to}: {e}')
+
 # ── Frontend ───────────────────────────────────────────────
 @app.route('/')
 def index():
@@ -133,6 +152,7 @@ def login():
     username = (data.get('username') or '').strip()
     password = (data.get('password') or '')
 
+    # Admin shortcut
     if username == 'admin' and password == 'admin1':
         admin = User.query.filter_by(is_admin=True).first()
         if admin:
@@ -142,6 +162,11 @@ def login():
     user = User.query.filter_by(email=username).first()
     if not user or not bcrypt.check_password_hash(user.password, password):
         return jsonify({'error': 'Invalid credentials'}), 401
+
+    if user.status == 'pending':
+        return jsonify({'error': 'Your account is pending admin approval. We will email you once it is reviewed.'}), 403
+    if user.status == 'declined':
+        return jsonify({'error': 'Your account request was declined. Please contact support.'}), 403
 
     return jsonify({'token': create_access_token(identity=str(user.id)),
                     'name': user.name, 'tier': user.tier, 'is_admin': user.is_admin})
@@ -160,13 +185,26 @@ def register():
     if User.query.filter_by(email=email).first():
         return jsonify({'error': 'Email already registered'}), 409
 
+    # Create account as PENDING — admin must approve
     user = User(name=name, email=email,
                 password=bcrypt.generate_password_hash(pw).decode(),
-                tier=tier, is_admin=False)
+                tier=tier, is_admin=False, status='pending')
     db.session.add(user)
     db.session.commit()
-    return jsonify({'token': create_access_token(identity=str(user.id)),
-                    'name': user.name, 'tier': user.tier, 'is_admin': False}), 201
+
+    # Notify user by email
+    plan_name = 'Scholar ($20/mo)' if tier == 2 else 'Reader ($10/mo)'
+    send_email(
+        email,
+        'BookVault — Your request has been received',
+        f'Hi {name},\n\nThank you for signing up for BookVault ({plan_name})!\n\n'
+        f'Your account is currently pending review. The admin will check your CashApp payment '
+        f'and approve your account shortly. You will receive another email once your account is activated.\n\n'
+        f'— The BookVault Team'
+    )
+
+    return jsonify({'status': 'pending',
+                    'message': 'Request submitted! We will email you once your account is approved.'}), 201
 
 
 @app.route('/api/auth/me', methods=['GET'])
@@ -219,13 +257,12 @@ def download_book(book_id):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-# ── Admin ──────────────────────────────────────────────────
+# ── Admin — Books ──────────────────────────────────────────
 @app.route('/api/admin/books', methods=['POST'])
 @jwt_required()
 def admin_upload_book():
     _, err = require_admin()
     if err: return err
-
     title  = request.form.get('title', '').strip()
     author = request.form.get('author', '').strip()
     if not title or not author:
@@ -271,30 +308,96 @@ def admin_delete_book(book_id):
     return jsonify({'deleted': book_id})
 
 
+# ── Admin — Stats ──────────────────────────────────────────
 @app.route('/api/admin/stats', methods=['GET'])
 @jwt_required()
 def admin_stats():
     _, err = require_admin()
     if err: return err
-    tier1 = User.query.filter_by(tier=1).count()
-    tier2 = User.query.filter_by(tier=2).count()
+    tier1 = User.query.filter_by(tier=1, status='active').count()
+    tier2 = User.query.filter_by(tier=2, status='active').count()
     return jsonify({
         'total_books':     Book.query.count(),
-        'total_users':     User.query.filter_by(is_admin=False).count(),
+        'total_users':     User.query.filter_by(is_admin=False, status='active').count(),
+        'pending_users':   User.query.filter_by(is_admin=False, status='pending').count(),
         'tier1_users':     tier1,
         'tier2_users':     tier2,
         'monthly_revenue': (tier1 * 10) + (tier2 * 20)
     })
 
 
+# ── Admin — Users ──────────────────────────────────────────
 @app.route('/api/admin/users', methods=['GET'])
 @jwt_required()
 def admin_users():
     _, err = require_admin()
     if err: return err
-    users = User.query.filter_by(is_admin=False).order_by(User.id.desc()).all()
+    users = User.query.filter_by(is_admin=False).filter(User.status != 'pending').order_by(User.id.desc()).all()
+    return jsonify([{'id': u.id, 'name': u.name, 'email': u.email, 'tier': u.tier, 'status': u.status}
+                    for u in users])
+
+
+@app.route('/api/admin/users/<int:user_id>', methods=['DELETE'])
+@jwt_required()
+def admin_delete_user(user_id):
+    _, err = require_admin()
+    if err: return err
+    user = User.query.get_or_404(user_id)
+    if user.is_admin:
+        return jsonify({'error': 'Cannot delete admin'}), 400
+    db.session.delete(user)
+    db.session.commit()
+    return jsonify({'deleted': user_id})
+
+
+# ── Admin — Requests (pending approvals) ───────────────────
+@app.route('/api/admin/requests', methods=['GET'])
+@jwt_required()
+def admin_requests():
+    _, err = require_admin()
+    if err: return err
+    users = User.query.filter_by(is_admin=False, status='pending').order_by(User.id.asc()).all()
     return jsonify([{'id': u.id, 'name': u.name, 'email': u.email, 'tier': u.tier}
                     for u in users])
+
+
+@app.route('/api/admin/requests/<int:user_id>/approve', methods=['POST'])
+@jwt_required()
+def admin_approve(user_id):
+    _, err = require_admin()
+    if err: return err
+    user = User.query.get_or_404(user_id)
+    user.status = 'active'
+    db.session.commit()
+    plan_name = 'Scholar ($20/mo)' if user.tier == 2 else 'Reader ($10/mo)'
+    send_email(
+        user.email,
+        'BookVault — Your account has been approved! 🎉',
+        f'Hi {user.name},\n\nGreat news! Your BookVault account ({plan_name}) has been approved.\n\n'
+        f'You can now log in at BookVault and start reading.\n\n'
+        f'— The BookVault Team'
+    )
+    return jsonify({'approved': user_id})
+
+
+@app.route('/api/admin/requests/<int:user_id>/decline', methods=['POST'])
+@jwt_required()
+def admin_decline(user_id):
+    _, err = require_admin()
+    if err: return err
+    user = User.query.get_or_404(user_id)
+    user.status = 'declined'
+    db.session.commit()
+    send_email(
+        user.email,
+        'BookVault — Account Request Update',
+        f'Hi {user.name},\n\nUnfortunately your BookVault account request has been declined.\n\n'
+        f'This may be because your CashApp payment could not be verified. '
+        f'If you believe this is a mistake, please contact support.\n\n'
+        f'— The BookVault Team'
+    )
+    return jsonify({'declined': user_id})
+
 
 # ── Manga (public) ─────────────────────────────────────────
 @app.route('/api/manga', methods=['GET'])
@@ -312,7 +415,6 @@ def list_manga():
 def admin_upload_manga():
     _, err = require_admin()
     if err: return err
-
     title  = request.form.get('title', '').strip()
     author = request.form.get('author', '').strip()
     if not title or not author:
