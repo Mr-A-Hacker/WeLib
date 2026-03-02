@@ -13,15 +13,13 @@ from botocore.client import Config
 from werkzeug.utils import secure_filename
 
 # ── App Setup ──────────────────────────────────────────────
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+app = Flask(__name__, static_folder='.', template_folder='.')
 
-app = Flask(__name__, static_folder=BASE_DIR)
-
-app.config['SQLALCHEMY_DATABASE_URI']    = os.environ.get('DATABASE_URL', 'sqlite:///bookvault.db').replace('postgres://', 'postgresql://')
+app.config['SQLALCHEMY_DATABASE_URI']     = os.environ.get('DATABASE_URL', 'sqlite:///bookvault.db').replace('postgres://', 'postgresql://')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['JWT_SECRET_KEY']             = os.environ.get('JWT_SECRET', 'change-me-in-production')
-app.config['JWT_ACCESS_TOKEN_EXPIRES']   = timedelta(days=7)
-app.config['MAX_CONTENT_LENGTH']         = 200 * 1024 * 1024  # 200 MB upload limit
+app.config['JWT_SECRET_KEY']              = os.environ.get('JWT_SECRET', 'change-me-in-production')
+app.config['JWT_ACCESS_TOKEN_EXPIRES']    = timedelta(days=7)
+app.config['MAX_CONTENT_LENGTH']          = 200 * 1024 * 1024  # 200 MB
 
 db     = SQLAlchemy(app)
 bcrypt = Bcrypt(app)
@@ -61,22 +59,18 @@ class Book(db.Model):
     year        = db.Column(db.Integer)
     color       = db.Column(db.String(20), default='#1a3a5c')
     description = db.Column(db.Text)
-    file_key    = db.Column(db.String(500))
-    file_name   = db.Column(db.String(300))
+    file_key    = db.Column(db.String(500))   # B2 object key
+    file_name   = db.Column(db.String(300))   # original filename
 
 # ── DB Init + seed ─────────────────────────────────────────
 def init_db():
     db.create_all()
     if not User.query.filter_by(email='admin@bookvault.com').first():
-        admin = User(
-            name='Admin',
-            email='admin@bookvault.com',
+        db.session.add(User(
+            name='Admin', email='admin@bookvault.com',
             password=bcrypt.generate_password_hash('admin1').decode(),
-            tier=0,
-            is_admin=True
-        )
-        db.session.add(admin)
-
+            tier=0, is_admin=True
+        ))
     if Book.query.count() == 0:
         seeds = [
             Book(title='The Great Gatsby',  author='F. Scott Fitzgerald', genre='Classic Literature', year=1925, color='#1a3a5c', description='A story of wealth, obsession, and the American Dream in the 1920s.'),
@@ -93,27 +87,29 @@ def init_db():
             Book(title='Educated',          author='Tara Westover',       genre='Biography',          year=2018, color='#3a1a5c', description='A remarkable memoir about escaping a survivalist family.'),
         ]
         db.session.add_all(seeds)
-
     db.session.commit()
 
 with app.app_context():
     init_db()
 
-# ── Helper ─────────────────────────────────────────────────
+# ── Helpers ────────────────────────────────────────────────
 ALLOWED_EXT = {'pdf', 'epub', 'txt'}
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXT
 
-# ── Serve Frontend ─────────────────────────────────────────
+def require_admin():
+    user = User.query.get(int(get_jwt_identity()))
+    if not user or not user.is_admin:
+        return None, (jsonify({'error': 'Admin only'}), 403)
+    return user, None
+
+# ── Frontend ───────────────────────────────────────────────
 @app.route('/')
 def index():
-    return send_from_directory(BASE_DIR, 'index.html')
+    return send_from_directory('.', 'index.html')
 
-# ══════════════════════════════════════════════════════════
-#  AUTH ROUTES
-# ══════════════════════════════════════════════════════════
-
+# ── Auth ───────────────────────────────────────────────────
 @app.route('/api/auth/login', methods=['POST'])
 def login():
     data     = request.get_json()
@@ -123,15 +119,15 @@ def login():
     if username == 'admin' and password == 'admin1':
         admin = User.query.filter_by(is_admin=True).first()
         if admin:
-            token = create_access_token(identity=str(admin.id))
-            return jsonify({'token': token, 'name': admin.name, 'tier': admin.tier, 'is_admin': True})
+            return jsonify({'token': create_access_token(identity=str(admin.id)),
+                            'name': admin.name, 'tier': admin.tier, 'is_admin': True})
 
     user = User.query.filter_by(email=username).first()
     if not user or not bcrypt.check_password_hash(user.password, password):
         return jsonify({'error': 'Invalid credentials'}), 401
 
-    token = create_access_token(identity=str(user.id))
-    return jsonify({'token': token, 'name': user.name, 'tier': user.tier, 'is_admin': user.is_admin})
+    return jsonify({'token': create_access_token(identity=str(user.id)),
+                    'name': user.name, 'tier': user.tier, 'is_admin': user.is_admin})
 
 
 @app.route('/api/auth/register', methods=['POST'])
@@ -147,12 +143,13 @@ def register():
     if User.query.filter_by(email=email).first():
         return jsonify({'error': 'Email already registered'}), 409
 
-    user = User(name=name, email=email, password=bcrypt.generate_password_hash(pw).decode(), tier=tier)
+    user = User(name=name, email=email,
+                password=bcrypt.generate_password_hash(pw).decode(),
+                tier=tier, is_admin=False)
     db.session.add(user)
     db.session.commit()
-
-    token = create_access_token(identity=str(user.id))
-    return jsonify({'token': token, 'name': user.name, 'tier': user.tier, 'is_admin': False}), 201
+    return jsonify({'token': create_access_token(identity=str(user.id)),
+                    'name': user.name, 'tier': user.tier, 'is_admin': False}), 201
 
 
 @app.route('/api/auth/me', methods=['GET'])
@@ -163,18 +160,14 @@ def me():
         return jsonify({'error': 'Not found'}), 404
     return jsonify({'name': user.name, 'tier': user.tier, 'is_admin': user.is_admin})
 
-# ══════════════════════════════════════════════════════════
-#  BOOK ROUTES
-# ══════════════════════════════════════════════════════════
-
+# ── Books ──────────────────────────────────────────────────
 @app.route('/api/books', methods=['GET'])
 def list_books():
     books = Book.query.order_by(Book.id.asc()).all()
-    return jsonify([{
-        'id': b.id, 'title': b.title, 'author': b.author,
-        'genre': b.genre, 'year': b.year, 'color': b.color,
-        'description': b.description, 'has_file': bool(b.file_key)
-    } for b in books])
+    return jsonify([{'id': b.id, 'title': b.title, 'author': b.author,
+                     'genre': b.genre, 'year': b.year, 'color': b.color,
+                     'description': b.description, 'has_file': bool(b.file_key)}
+                    for b in books])
 
 
 @app.route('/api/books/<int:book_id>/read', methods=['GET'])
@@ -183,12 +176,10 @@ def read_book(book_id):
     user = User.query.get(int(get_jwt_identity()))
     if not user or user.tier < 1:
         return jsonify({'error': 'Subscription required'}), 403
-    book = Book.query.get_or_404(book_id)
-    return jsonify({
-        'id': book.id, 'title': book.title, 'author': book.author,
-        'genre': book.genre, 'year': book.year,
-        'description': book.description, 'has_file': bool(book.file_key)
-    })
+    b = Book.query.get_or_404(book_id)
+    return jsonify({'id': b.id, 'title': b.title, 'author': b.author,
+                    'genre': b.genre, 'year': b.year, 'description': b.description,
+                    'has_file': bool(b.file_key)})
 
 
 @app.route('/api/books/<int:book_id>/download', methods=['GET'])
@@ -197,32 +188,21 @@ def download_book(book_id):
     user = User.query.get(int(get_jwt_identity()))
     if not user or user.tier < 2:
         return jsonify({'error': 'Scholar plan required to download'}), 403
-    book = Book.query.get_or_404(book_id)
-    if not book.file_key:
+    b = Book.query.get_or_404(book_id)
+    if not b.file_key:
         return jsonify({'error': 'No file uploaded for this book'}), 404
     try:
-        b2  = get_b2_client()
-        url = b2.generate_presigned_url(
+        url = get_b2_client().generate_presigned_url(
             'get_object',
-            Params={'Bucket': B2_BUCKET_NAME, 'Key': book.file_key,
-                    'ResponseContentDisposition': f'attachment; filename="{book.file_name}"'},
+            Params={'Bucket': B2_BUCKET_NAME, 'Key': b.file_key,
+                    'ResponseContentDisposition': f'attachment; filename="{b.file_name}"'},
             ExpiresIn=300
         )
         return jsonify({'url': url})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-# ══════════════════════════════════════════════════════════
-#  ADMIN ROUTES
-# ══════════════════════════════════════════════════════════
-
-def require_admin():
-    user = User.query.get(int(get_jwt_identity()))
-    if not user or not user.is_admin:
-        return None, (jsonify({'error': 'Admin only'}), 403)
-    return user, None
-
-
+# ── Admin ──────────────────────────────────────────────────
 @app.route('/api/admin/books', methods=['POST'])
 @jwt_required()
 def admin_upload_book():
@@ -234,13 +214,7 @@ def admin_upload_book():
     if not title or not author:
         return jsonify({'error': 'Title and author required'}), 400
 
-    genre     = request.form.get('genre', '')
-    year      = request.form.get('year', '')
-    color     = request.form.get('color', '#1a3a5c')
-    desc      = request.form.get('description', '')
-    file_key  = None
-    file_name = None
-
+    file_key = file_name = None
     if 'file' in request.files:
         f = request.files['file']
         if f and f.filename and allowed_file(f.filename):
@@ -248,15 +222,17 @@ def admin_upload_book():
             file_key  = f'books/{uuid.uuid4().hex}/{original}'
             file_name = original
             try:
-                b2 = get_b2_client()
-                b2.upload_fileobj(f, B2_BUCKET_NAME, file_key)
+                get_b2_client().upload_fileobj(f, B2_BUCKET_NAME, file_key)
             except Exception as e:
                 return jsonify({'error': f'B2 upload failed: {e}'}), 500
 
+    year = request.form.get('year', '')
     book = Book(
-        title=title, author=author, genre=genre,
+        title=title, author=author,
+        genre=request.form.get('genre', ''),
         year=int(year) if year.isdigit() else None,
-        color=color, description=desc,
+        color=request.form.get('color', '#1a3a5c'),
+        description=request.form.get('description', ''),
         file_key=file_key, file_name=file_name
     )
     db.session.add(book)
@@ -269,15 +245,10 @@ def admin_upload_book():
 def admin_delete_book(book_id):
     _, err = require_admin()
     if err: return err
-
     book = Book.query.get_or_404(book_id)
     if book.file_key:
-        try:
-            b2 = get_b2_client()
-            b2.delete_object(Bucket=B2_BUCKET_NAME, Key=book.file_key)
-        except Exception:
-            pass
-
+        try: get_b2_client().delete_object(Bucket=B2_BUCKET_NAME, Key=book.file_key)
+        except Exception: pass
     db.session.delete(book)
     db.session.commit()
     return jsonify({'deleted': book_id})
@@ -288,9 +259,8 @@ def admin_delete_book(book_id):
 def admin_stats():
     _, err = require_admin()
     if err: return err
-
-    tier1   = User.query.filter_by(tier=1).count()
-    tier2   = User.query.filter_by(tier=2).count()
+    tier1 = User.query.filter_by(tier=1).count()
+    tier2 = User.query.filter_by(tier=2).count()
     return jsonify({
         'total_books':     Book.query.count(),
         'total_users':     User.query.filter_by(is_admin=False).count(),
@@ -305,9 +275,9 @@ def admin_stats():
 def admin_users():
     _, err = require_admin()
     if err: return err
-
     users = User.query.filter_by(is_admin=False).order_by(User.id.desc()).all()
-    return jsonify([{'id': u.id, 'name': u.name, 'email': u.email, 'tier': u.tier} for u in users])
+    return jsonify([{'id': u.id, 'name': u.name, 'email': u.email, 'tier': u.tier}
+                    for u in users])
 
 
 if __name__ == '__main__':
