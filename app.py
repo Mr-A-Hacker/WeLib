@@ -62,6 +62,19 @@ class Book(db.Model):
     file_key    = db.Column(db.String(500))   # B2 object key
     file_name   = db.Column(db.String(300))   # original filename
 
+class Manga(db.Model):
+    __tablename__ = 'manga'
+    id          = db.Column(db.Integer, primary_key=True)
+    title       = db.Column(db.String(300), nullable=False)
+    author      = db.Column(db.String(200), nullable=False)
+    genre       = db.Column(db.String(100))
+    chapters    = db.Column(db.Integer)
+    status      = db.Column(db.String(50), default='Ongoing')  # Ongoing / Completed
+    color       = db.Column(db.String(20), default='#1a1a2e')
+    description = db.Column(db.Text)
+    file_key    = db.Column(db.String(500))
+    file_name   = db.Column(db.String(300))
+
 # ── DB Init + seed ─────────────────────────────────────────
 def init_db():
     db.create_all()
@@ -93,10 +106,14 @@ with app.app_context():
     init_db()
 
 # ── Helpers ────────────────────────────────────────────────
-ALLOWED_EXT = {'pdf', 'epub', 'txt'}
+ALLOWED_EXT       = {'pdf', 'epub', 'txt'}
+ALLOWED_EXT_MANGA = {'pdf', 'cbz', 'cbr', 'zip'}
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXT
+
+def allowed_manga_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXT_MANGA
 
 def require_admin():
     user = User.query.get(int(get_jwt_identity()))
@@ -278,6 +295,68 @@ def admin_users():
     users = User.query.filter_by(is_admin=False).order_by(User.id.desc()).all()
     return jsonify([{'id': u.id, 'name': u.name, 'email': u.email, 'tier': u.tier}
                     for u in users])
+
+# ── Manga (public) ─────────────────────────────────────────
+@app.route('/api/manga', methods=['GET'])
+def list_manga():
+    items = Manga.query.order_by(Manga.id.asc()).all()
+    return jsonify([{'id': m.id, 'title': m.title, 'author': m.author,
+                     'genre': m.genre, 'chapters': m.chapters, 'status': m.status,
+                     'color': m.color, 'description': m.description,
+                     'has_file': bool(m.file_key)}
+                    for m in items])
+
+# ── Manga (admin) ──────────────────────────────────────────
+@app.route('/api/admin/manga', methods=['POST'])
+@jwt_required()
+def admin_upload_manga():
+    _, err = require_admin()
+    if err: return err
+
+    title  = request.form.get('title', '').strip()
+    author = request.form.get('author', '').strip()
+    if not title or not author:
+        return jsonify({'error': 'Title and author required'}), 400
+
+    file_key = file_name = None
+    if 'file' in request.files:
+        f = request.files['file']
+        if f and f.filename and allowed_manga_file(f.filename):
+            original  = secure_filename(f.filename)
+            file_key  = f'manga/{uuid.uuid4().hex}/{original}'
+            file_name = original
+            try:
+                get_b2_client().upload_fileobj(f, B2_BUCKET_NAME, file_key)
+            except Exception as e:
+                return jsonify({'error': f'B2 upload failed: {e}'}), 500
+
+    chapters = request.form.get('chapters', '')
+    manga = Manga(
+        title=title, author=author,
+        genre=request.form.get('genre', ''),
+        chapters=int(chapters) if chapters.isdigit() else None,
+        status=request.form.get('status', 'Ongoing'),
+        color=request.form.get('color', '#1a1a2e'),
+        description=request.form.get('description', ''),
+        file_key=file_key, file_name=file_name
+    )
+    db.session.add(manga)
+    db.session.commit()
+    return jsonify({'id': manga.id, 'title': manga.title}), 201
+
+
+@app.route('/api/admin/manga/<int:manga_id>', methods=['DELETE'])
+@jwt_required()
+def admin_delete_manga(manga_id):
+    _, err = require_admin()
+    if err: return err
+    manga = Manga.query.get_or_404(manga_id)
+    if manga.file_key:
+        try: get_b2_client().delete_object(Bucket=B2_BUCKET_NAME, Key=manga.file_key)
+        except Exception: pass
+    db.session.delete(manga)
+    db.session.commit()
+    return jsonify({'deleted': manga_id})
 
 
 if __name__ == '__main__':
