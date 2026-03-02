@@ -8,7 +8,6 @@ from flask_jwt_extended import (
     JWTManager, create_access_token,
     jwt_required, get_jwt_identity
 )
-from flask_mail import Mail, Message
 from datetime import timedelta
 from botocore.client import Config
 from werkzeug.utils import secure_filename
@@ -18,22 +17,13 @@ app = Flask(__name__, static_folder='.', template_folder='.')
 
 app.config['SQLALCHEMY_DATABASE_URI']        = os.environ.get('DATABASE_URL', 'sqlite:///bookvault.db').replace('postgres://', 'postgresql://')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['JWT_SECRET_KEY']                 = os.environ.get('JWT_SECRET', 'change-me-in-production')
+app.config['JWT_SECRET_KEY']                 = os.environ.get('JWT_SECRET', 'bookvault-super-secret-key-change-in-production-2026')
 app.config['JWT_ACCESS_TOKEN_EXPIRES']       = timedelta(days=7)
 app.config['MAX_CONTENT_LENGTH']             = 200 * 1024 * 1024  # 200 MB
-
-# ── Mail Config (set these env vars in Render) ─────────────
-app.config['MAIL_SERVER']         = os.environ.get('MAIL_SERVER', 'smtp.gmail.com')
-app.config['MAIL_PORT']           = int(os.environ.get('MAIL_PORT', 587))
-app.config['MAIL_USE_TLS']        = True
-app.config['MAIL_USERNAME']       = os.environ.get('MAIL_USERNAME', '')
-app.config['MAIL_PASSWORD']       = os.environ.get('MAIL_PASSWORD', '')
-app.config['MAIL_DEFAULT_SENDER'] = os.environ.get('MAIL_DEFAULT_SENDER', os.environ.get('MAIL_USERNAME', ''))
 
 db     = SQLAlchemy(app)
 bcrypt = Bcrypt(app)
 jwt    = JWTManager(app)
-mail   = Mail(app)
 
 # ── Backblaze B2 ───────────────────────────────────────────
 B2_KEY_ID      = os.environ.get('B2_KEY_ID', '')
@@ -57,7 +47,7 @@ class User(db.Model):
     name     = db.Column(db.String(120), nullable=False)
     email    = db.Column(db.String(200), unique=True, nullable=False)
     password = db.Column(db.String(200), nullable=False)
-    tier     = db.Column(db.Integer, default=1)        # 1=Reader, 2=Scholar
+    tier     = db.Column(db.Integer, default=1)
     is_admin = db.Column(db.Boolean, default=False)
     status   = db.Column(db.String(20), default='pending')  # pending / active / declined
 
@@ -132,14 +122,6 @@ def require_admin():
         return None, (jsonify({'error': 'Admin only'}), 403)
     return user, None
 
-def send_email(to, subject, body):
-    """Send email — silently fails if mail not configured."""
-    try:
-        msg = Message(subject, recipients=[to], body=body)
-        mail.send(msg)
-    except Exception as e:
-        print(f'[Mail] Could not send to {to}: {e}')
-
 # ── Frontend ───────────────────────────────────────────────
 @app.route('/')
 def index():
@@ -152,7 +134,6 @@ def login():
     username = (data.get('username') or '').strip()
     password = (data.get('password') or '')
 
-    # Admin shortcut
     if username == 'admin' and password == 'admin1':
         admin = User.query.filter_by(is_admin=True).first()
         if admin:
@@ -164,7 +145,7 @@ def login():
         return jsonify({'error': 'Invalid credentials'}), 401
 
     if user.status == 'pending':
-        return jsonify({'error': 'Your account is pending admin approval. We will email you once it is reviewed.'}), 403
+        return jsonify({'error': 'Your account is pending admin approval.'}), 403
     if user.status == 'declined':
         return jsonify({'error': 'Your account request was declined. Please contact support.'}), 403
 
@@ -185,26 +166,13 @@ def register():
     if User.query.filter_by(email=email).first():
         return jsonify({'error': 'Email already registered'}), 409
 
-    # Create account as PENDING — admin must approve
     user = User(name=name, email=email,
                 password=bcrypt.generate_password_hash(pw).decode(),
                 tier=tier, is_admin=False, status='pending')
     db.session.add(user)
     db.session.commit()
-
-    # Notify user by email
-    plan_name = 'Scholar ($20/mo)' if tier == 2 else 'Reader ($10/mo)'
-    send_email(
-        email,
-        'BookVault — Your request has been received',
-        f'Hi {name},\n\nThank you for signing up for BookVault ({plan_name})!\n\n'
-        f'Your account is currently pending review. The admin will check your CashApp payment '
-        f'and approve your account shortly. You will receive another email once your account is activated.\n\n'
-        f'— The BookVault Team'
-    )
-
     return jsonify({'status': 'pending',
-                    'message': 'Request submitted! We will email you once your account is approved.'}), 201
+                    'message': 'Request submitted! The admin will review your payment and activate your account.'}), 201
 
 
 @app.route('/api/auth/me', methods=['GET'])
@@ -307,7 +275,6 @@ def admin_delete_book(book_id):
     db.session.commit()
     return jsonify({'deleted': book_id})
 
-
 # ── Admin — Stats ──────────────────────────────────────────
 @app.route('/api/admin/stats', methods=['GET'])
 @jwt_required()
@@ -324,7 +291,6 @@ def admin_stats():
         'tier2_users':     tier2,
         'monthly_revenue': (tier1 * 10) + (tier2 * 20)
     })
-
 
 # ── Admin — Users ──────────────────────────────────────────
 @app.route('/api/admin/users', methods=['GET'])
@@ -349,8 +315,7 @@ def admin_delete_user(user_id):
     db.session.commit()
     return jsonify({'deleted': user_id})
 
-
-# ── Admin — Requests (pending approvals) ───────────────────
+# ── Admin — Requests ───────────────────────────────────────
 @app.route('/api/admin/requests', methods=['GET'])
 @jwt_required()
 def admin_requests():
@@ -369,14 +334,6 @@ def admin_approve(user_id):
     user = User.query.get_or_404(user_id)
     user.status = 'active'
     db.session.commit()
-    plan_name = 'Scholar ($20/mo)' if user.tier == 2 else 'Reader ($10/mo)'
-    send_email(
-        user.email,
-        'BookVault — Your account has been approved! 🎉',
-        f'Hi {user.name},\n\nGreat news! Your BookVault account ({plan_name}) has been approved.\n\n'
-        f'You can now log in at BookVault and start reading.\n\n'
-        f'— The BookVault Team'
-    )
     return jsonify({'approved': user_id})
 
 
@@ -388,16 +345,7 @@ def admin_decline(user_id):
     user = User.query.get_or_404(user_id)
     user.status = 'declined'
     db.session.commit()
-    send_email(
-        user.email,
-        'BookVault — Account Request Update',
-        f'Hi {user.name},\n\nUnfortunately your BookVault account request has been declined.\n\n'
-        f'This may be because your CashApp payment could not be verified. '
-        f'If you believe this is a mistake, please contact support.\n\n'
-        f'— The BookVault Team'
-    )
     return jsonify({'declined': user_id})
-
 
 # ── Manga (public) ─────────────────────────────────────────
 @app.route('/api/manga', methods=['GET'])
@@ -462,5 +410,5 @@ def admin_delete_manga(manga_id):
 
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
+    port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port, debug=False)
