@@ -674,16 +674,25 @@ async function showAdmin(){
 // ── LIBRARY ────────────────────────────────────────────
 async function loadBooks(){
   try {
-    allBooks = await api('/api/books');
-    buildMarquee(allBooks);
-    renderGenreFilters();
-    renderBooks();
-  } catch(e){ showToast('Failed to load books: '+e.message); }
+    // Use plain fetch — public endpoint, no auth or Content-Type needed
+    const res = await fetch('/api/books');
+    if (!res.ok) throw new Error('Server error ' + res.status);
+    allBooks = await res.json();
+  } catch(e){
+    showToast('Failed to load books: ' + e.message);
+    allBooks = [];
+  }
+  // Render independently so a marquee error never blocks the grid
+  try { buildMarquee(allBooks); } catch(e){}
+  renderGenreFilters();
+  renderBooks();
 }
 
 function buildMarquee(books){
+  const el = document.getElementById('marquee1');
+  if(!el || !books.length) return;
   const items = [...books,...books];
-  document.getElementById('marquee1').innerHTML = items.map(b=>`
+  el.innerHTML = items.map(b=>`
     <div class="book-card-mini">
       <div class="book-spine" style="background:${b.color}">
         <span style="color:#fff;font-size:8px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;line-height:1.2">${b.title}</span>
