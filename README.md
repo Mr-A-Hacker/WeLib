@@ -1,4 +1,9 @@
 > ## 👋 Start Here
+> A library-oriented web/application project. **For users:** explore its current library or content-management functionality.
+
+---
+
+> ## 👋 Start Here
 > A library-oriented web/application project. **For users:** explore the repository to understand its current library/content-management functionality.
 >
 > **Safety & privacy:** Use security, network, camera, and data-collection features only with appropriate authorization and consent.
