@@ -1,3 +1,10 @@
+> ## 👋 Start Here
+> A library-oriented web/application project. **For users:** explore the repository to understand its current library/content-management functionality.
+>
+> **Safety & privacy:** Use security, network, camera, and data-collection features only with appropriate authorization and consent.
+
+---
+
 # 📚 WeLib  
 A lightweight, self‑hosted web library system built with **Python (Flask)** and a simple HTML interface.  
 WeLib is designed to be fast, minimal, and easy to deploy — perfect for small personal libraries, LAN setups, or simple book‑tracking tools.
